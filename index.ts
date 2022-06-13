@@ -1,6 +1,6 @@
 import { Plugin, PluginEvent } from '@posthog/plugin-scaffold'
 import fetch from 'node-fetch'
-
+ 
 export interface Migrator3000MetaInput {
     global: {
         startDate: string
@@ -16,23 +16,25 @@ export interface Migrator3000MetaInput {
         posthogVersion: string
     }
 }
-
+ 
 interface PluginEventExtra extends PluginEvent {
     $token?: string
     project_id?: string
     api_key?: string
 }
-
+ 
 const TEN_MINUTES = 10 * 60 * 1000
-
+ 
 const ELEMENT_TRANSFORMATIONS: Record<string, string> = {
     text: '$el_text',
     attr_class: 'attr__class',
     attr_id: 'attr__id',
-    href: 'attr__href'
+    href: 'attr__href',
 }
-
+ 
 const parseAndSendEvents = async (events: PluginEventExtra[], { config, global }: Migrator3000MetaInput) => {
+    console.log(`Running parse and send events, with batch size: ${events.length}`)
+ 
     const batch = []
     for (const event of events) {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -40,8 +42,7 @@ const parseAndSendEvents = async (events: PluginEventExtra[], { config, global }
             ...event,
             token: config.projectApiKey,
         }
-
-
+ 
         if (sendableEvent.properties && sendableEvent.properties.$elements) {
             const newElements = []
             for (const element of sendableEvent.properties.$elements) {
@@ -59,13 +60,15 @@ const parseAndSendEvents = async (events: PluginEventExtra[], { config, global }
         sendableEvent.timestamp = event.timestamp || new Date(Date.now()).toISOString()
         batch.push(sendableEvent)
     }
-
+ 
     if (batch.length > 0) {
+        console.log(`Now sending batch`)
         const res = await fetch(`https://${config.host}/e`, {
             method: 'POST',
             body: JSON.stringify(batch),
             headers: { 'Content-Type': 'application/json' },
         })
+        console.log(await res.json())
         if (global.debug) {
             const textRes = await res.text()
             console.log('RESPONSE:', textRes)
@@ -75,7 +78,7 @@ const parseAndSendEvents = async (events: PluginEventExtra[], { config, global }
         console.log('Skipping empty batch of events')
     }
 }
-
+ 
 const plugin: Plugin<Migrator3000MetaInput> = {
     jobs: {
         '[ADVANCED] Force restart': async (_, { storage, jobs }) => {
@@ -94,31 +97,35 @@ const plugin: Plugin<Migrator3000MetaInput> = {
         },
         parseAndSendEvents: async (payload, meta) => {
             await parseAndSendEvents(payload.events, meta)
-        }
+        },
     },
     runEveryMinute: async ({ global, jobs, storage, cache }) => {
+        console.log(`Running every minute`)
+ 
         const currentDate = new Date()
         const lastRun = await cache.get('last_run', null)
+        console.log(`Last run in cache was at: ${lastRun}`)
         if (!lastRun || currentDate.getTime() - Number(lastRun) > TEN_MINUTES) {
             // this "magic" key is added via the historical export upgrade
             const isExportRunning = await storage.get('is_export_running', false)
             if (isExportRunning) {
+                console.log(`Doing nothing because export is still running: ${isExportRunning}`)
                 return
             }
-
+ 
             const previousMaxDate = await storage.get('max_date', global.startDate)
-
+ 
             await jobs['Export historical events']({
                 dateFrom: previousMaxDate,
                 dateTo: currentDate.toISOString(),
             }).runNow()
-
+ 
             console.log(`Now starting export of events from ${previousMaxDate} to ${currentDate.toISOString()}`)
             await storage.set('max_date', currentDate.toISOString())
             await cache.set('last_run', currentDate.getTime())
         }
     },
-
+ 
     setupPlugin: async ({ config, global }) => {
         try {
             global.startDate = config.startDate ? new Date(config.startDate).toISOString() : null
@@ -127,15 +134,15 @@ const plugin: Plugin<Migrator3000MetaInput> = {
             throw e
         }
         global.debug = config.debug === 'ON'
-
-        if (config.posthogVersion === "Latest" || config.posthogVersion === "1.30.0+") {
+ 
+        if (config.posthogVersion === 'Latest' || config.posthogVersion === '1.30.0+') {
             global.versionMajor = 1
             global.versionMinor = 31
             return
         }
-
+ 
         try {
-            const parsedVersion = config.posthogVersion.split('.').map(digit => Number(digit))
+            const parsedVersion = config.posthogVersion.split('.').map((digit) => Number(digit))
             global.versionMajor = parsedVersion[0]
             global.versionMinor = parsedVersion[1]
         } catch (e) {
@@ -143,21 +150,28 @@ const plugin: Plugin<Migrator3000MetaInput> = {
         }
     },
     exportEvents: async (events: PluginEventExtra[], { global, jobs }) => {
+        console.log(`Running export events`)
         if (events.length === 0) {
+            console.log(`No events to export`)
             return
         }
-
+ 
+        console.log(`Event looks like: ${JSON.stringify(events[0])}`)
+ 
         // dont export live events, only historical ones
         if (global.versionMajor > 1 || (global.versionMajor === 1 && global.versionMinor > 29)) {
             if (!events[0].properties || !events[0].properties['$$is_historical_export_event']) {
+                console.log(`Quitting because live event`)
                 return
             }
         } else if (events[0].uuid) {
+            console.log(`Quitting because event has uuid? idk`)
+ 
             return
         }
-
+ 
         await jobs.parseAndSendEvents({ events }).runNow()
     },
 }
-
+ 
 module.exports = plugin
